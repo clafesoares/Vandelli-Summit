@@ -1,3 +1,4 @@
+
 import React, { createContext, useContext, useState, useEffect, ReactNode } from 'react';
 import { User, AppState, LotteryState, Sponsor } from '../types';
 import { supabase } from '../services/supabaseClient';
@@ -24,6 +25,7 @@ interface EventContextType {
   broadcastMessage: { id: string; text: string } | null;
   sendBroadcastMessage: (text: string) => Promise<void>;
   isAuthenticated: boolean;
+  isConnected: boolean;
   loginAdmin: (username: string, pass: string) => boolean;
   logoutAdmin: () => void;
   updateAdminPassword: (newPass: string) => Promise<boolean>;
@@ -45,13 +47,18 @@ export const EventProvider: React.FC<{ children: ReactNode }> = ({ children }) =
   const [eventImage, setEventImage] = useState<string | null>(null);
   const [broadcastMessage, setBroadcastMessage] = useState<{ id: string; text: string } | null>(null);
   const [isAuthenticated, setIsAuthenticated] = useState(false);
+  const [isConnected, setIsConnected] = useState(false);
   const [currentAdminPassword, setCurrentAdminPassword] = useState('#SMTsec$2026');
   const ADMIN_USERNAME = 'Arrow';
 
   useEffect(() => {
     const fetchData = async () => {
       try {
-        const { data: usersData } = await supabase.from('users').select('*');
+        const { data: usersData, error: usersError } = await supabase.from('users').select('*');
+        if (usersError) throw usersError;
+        
+        setIsConnected(true);
+
         if (usersData) {
           setUsers(usersData.map((u: any) => ({
              id: u.id, name: u.name, email: u.email, company: u.company, phone: u.phone,
@@ -67,8 +74,18 @@ export const EventProvider: React.FC<{ children: ReactNode }> = ({ children }) =
           })));
         }
 
-        const { data: globalData } = await supabase.from('global_state').select('*').eq('id', 1).maybeSingle();
-        if (globalData) {
+        const { data: globalData, error: globalError } = await supabase.from('global_state').select('*').eq('id', 1).maybeSingle();
+        
+        if (!globalData && !globalError) {
+          // Initialize global state if missing
+          const initialState = {
+            id: 1,
+            app_state: AppState.NORMAL,
+            lottery_active: false,
+            admin_password: '#SMTsec$2026'
+          };
+          await supabase.from('global_state').insert([initialState]);
+        } else if (globalData) {
            setLocalAppState(globalData.app_state as AppState);
            setLocalLotteryState({
                active: globalData.lottery_active,
@@ -85,6 +102,7 @@ export const EventProvider: React.FC<{ children: ReactNode }> = ({ children }) =
         }
       } catch (e) {
         console.error("Initial fetch error:", e);
+        setIsConnected(false);
       }
     };
     fetchData();
@@ -96,11 +114,14 @@ export const EventProvider: React.FC<{ children: ReactNode }> = ({ children }) =
         .on('postgres_changes', { event: '*', schema: 'public', table: 'users' }, (payload) => {
             if (payload.eventType === 'INSERT') {
                const u = payload.new;
-               setUsers(prev => [...prev, {
+               setUsers(prev => {
+                 if (prev.some(user => user.id === u.id)) return prev;
+                 return [...prev, {
                    id: u.id, name: u.name, email: u.email, company: u.company, phone: u.phone,
                    ticketNumbers: u.ticket_numbers || [], checkedIn: u.checked_in,
                    registrationDate: u.registration_date, status: u.status, visitedStands: u.visited_stands || []
-               }]);
+                 }];
+               });
             } else if (payload.eventType === 'UPDATE') {
                const u = payload.new;
                setUsers(prev => prev.map(user => user.id === u.id ? {
@@ -165,14 +186,13 @@ export const EventProvider: React.FC<{ children: ReactNode }> = ({ children }) =
 
       if (error) {
           console.error("Supabase registration error detail:", error);
-          const msg = error.message === 'Load failed' 
-            ? "Falha de rede: Verifique se o projeto Supabase está ativo ou se o seu AdBlocker está a bloquear o domínio."
-            : error.message;
+          const msg = error.code === 'PGRST116' ? "Erro de integridade. Verifique se o utilizador já existe." : 
+                      error.message === 'Load failed' ? "Ligação à base de dados bloqueada ou falha de rede." : error.message;
           return { success: false, error: msg };
       }
 
       if (!data || data.length === 0) {
-          return { success: false, error: "O servidor não devolveu dados após o registo. Verifique as políticas de RLS." };
+          return { success: false, error: "Registo falhou. Verifique as políticas de segurança da base de dados." };
       }
 
       const u = data[0];
@@ -183,8 +203,7 @@ export const EventProvider: React.FC<{ children: ReactNode }> = ({ children }) =
       };
       return { success: true, user: registeredUser };
     } catch (e: any) {
-      console.error("Critical error during registration:", e);
-      return { success: false, error: e.message || "Erro desconhecido de rede." };
+      return { success: false, error: "Erro crítico de rede ao contactar a base de dados." };
     }
   };
 
@@ -333,7 +352,7 @@ export const EventProvider: React.FC<{ children: ReactNode }> = ({ children }) =
       appState, setAppState, lotteryState, setLotteryState: updateLotteryState as any,
       exportUsersToExcel, importUsersFromExcel, sponsors, addSponsor, removeSponsor,
       eventImage, uploadEventImage, removeEventImage, broadcastMessage, sendBroadcastMessage,
-      isAuthenticated, loginAdmin, logoutAdmin, updateAdminPassword
+      isAuthenticated, isConnected, loginAdmin, logoutAdmin, updateAdminPassword
     }}>
       {children}
     </EventContext.Provider>
